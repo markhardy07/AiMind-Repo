@@ -1,0 +1,126 @@
+name: RLS Security Check
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  rls-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup PostgreSQL client
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client
+        
+    - name: Run RLS Security Check
+      env:
+        PGHOST: ${{ secrets.SUPABASE_DB_HOST }}
+        PGPORT: ${{ secrets.SUPABASE_DB_PORT }}
+        PGDATABASE: ${{ secrets.SUPABASE_DB_NAME }}
+        PGUSER: ${{ secrets.SUPABASE_DB_USER }}
+        PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      run: |
+        # Create temporary SQL file
+        cat > rls_check.sql << 'EOF'
+        -- RLS Security Check Query
+        -- This query identifies public tables without Row Level Security enabled
+        WITH public_tables AS (
+          SELECT 
+            schemaname,
+            tablename,
+            hasrls,
+            CASE 
+              WHEN hasrls THEN 'RLS ENABLED ✓'
+              ELSE 'RLS DISABLED ✗'
+            END as rls_status
+          FROM pg_tables 
+          WHERE schemaname = 'public'
+          ORDER BY tablename
+        ),
+        summary AS (
+          SELECT 
+            COUNT(*) as total_tables,
+            COUNT(*) FILTER (WHERE hasrls = true) as tables_with_rls,
+            COUNT(*) FILTER (WHERE hasrls = false) as tables_without_rls
+          FROM public_tables
+        )
+        SELECT 
+          'SUMMARY:' as info,
+          total_tables::text as total,
+          tables_with_rls::text as with_rls,
+          tables_without_rls::text as without_rls
+        FROM summary
+        
+        UNION ALL
+        
+        SELECT 
+          'DETAILS:' as info,
+          schemaname || '.' || tablename as table_name,
+          rls_status,
+          '' as extra
+        FROM public_tables
+        WHERE hasrls = false
+        
+        UNION ALL
+        
+        SELECT 
+          'PASSED:' as info,
+          schemaname || '.' || tablename as table_name,
+          rls_status,
+          '' as extra
+        FROM public_tables
+        WHERE hasrls = true;
+        EOF
+        
+        # Run the RLS check
+        echo "🔍 Checking Row Level Security on public tables..."
+        echo "=================================================="
+        
+        # Execute the query and capture results
+        psql -f rls_check.sql -t -A -F'|' > rls_results.txt
+        
+        # Display results
+        cat rls_results.txt | while IFS='|' read -r info total with_rls without_rls; do
+          if [ "$info" = "SUMMARY:" ]; then
+            echo "📊 SUMMARY:"
+            echo "   Total tables: $total"
+            echo "   With RLS: $with_rls"
+            echo "   Without RLS: $without_rls"
+            echo ""
+          elif [ "$info" = "DETAILS:" ]; then
+            echo "❌ Tables WITHOUT RLS:"
+            echo "   $total ($with_rls)"
+          elif [ "$info" = "PASSED:" ]; then
+            echo "✅ Tables WITH RLS:"
+            echo "   $total ($with_rls)"
+          fi
+        done
+        
+        # Check if any tables are missing RLS
+        tables_without_rls=$(psql -f rls_check.sql -t -A -F'|' | grep "DETAILS:" | wc -l)
+        
+        if [ "$tables_without_rls" -gt 0 ]; then
+          echo ""
+          echo "🚨 SECURITY ALERT: $tables_without_rls table(s) found without RLS enabled!"
+          echo "Please enable Row Level Security on all public tables."
+          echo ""
+          echo "To enable RLS on a table, run:"
+          echo "ALTER TABLE table_name ENABLE ROW LEVEL SECURITY;"
+          exit 1
+        else
+          echo ""
+          echo "✅ All public tables have Row Level Security enabled!"
+          exit 0
+        fi
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -f rls_check.sql rls_results.txt
