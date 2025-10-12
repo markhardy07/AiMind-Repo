@@ -1,0 +1,48 @@
+name: RLS Security Check (Supabase CLI)
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  rls-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Supabase CLI
+      run: |
+        npm install -g supabase
+        
+    - name: Run RLS Security Check
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      run: |
+        echo "🔍 Checking Row Level Security on public tables..."
+        echo "=================================================="
+        
+        # Run SQL query to check RLS using curl and Supabase REST API
+        SQL="SELECT n.nspname AS table_schema, c.relname AS table_name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relrowsecurity = false;"
+        
+        RESULT=$(curl -s -X POST "$SUPABASE_URL/rest/v1/rpc/exec_sql" \
+          -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+          -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+          -H "Content-Type: application/json" \
+          -d "{\"sql\": \"$SQL\"}")
+        
+        if [[ -n "${RESULT//[[:space:]]/}" ]]; then
+          echo "❌ Tables WITHOUT RLS:"
+          echo "$RESULT"
+          echo ""
+          echo "🚨 SECURITY ALERT: Tables found without RLS enabled!"
+          echo "Please enable Row Level Security on all public tables."
+          exit 1
+        else
+          echo "✅ All public tables have Row Level Security enabled!"
+          exit 0
+        fi

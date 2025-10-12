@@ -1,0 +1,56 @@
+name: RLS Security Check (API Keys)
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  rls-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup PostgreSQL client
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client
+        
+    - name: Run RLS Security Check
+      env:
+        PGHOST: ${{ secrets.SUPABASE_DB_HOST }}
+        PGPORT: ${{ secrets.SUPABASE_DB_PORT }}
+        PGDATABASE: ${{ secrets.SUPABASE_DB_NAME }}
+        PGUSER: ${{ secrets.SUPABASE_DB_USER }}
+        PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      run: |
+        echo "🔍 Checking Row Level Security on public tables..."
+        echo "=================================================="
+        
+        # SQL query to check RLS
+        cat > rls_check.sql << 'EOF'
+        SELECT n.nspname AS table_schema, c.relname AS table_name
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind = 'r'  -- ordinary table
+          AND c.relrowsecurity = false;
+        EOF
+        
+        # Run the query
+        RESULT=$(psql -f rls_check.sql -t -A -F'|')
+        
+        if [[ -n "${RESULT//[[:space:]]/}" ]]; then
+          echo "❌ Tables WITHOUT RLS:"
+          echo "$RESULT"
+          echo ""
+          echo "🚨 SECURITY ALERT: Tables found without RLS enabled!"
+          echo "Please enable Row Level Security on all public tables."
+          exit 1
+        else
+          echo "✅ All public tables have Row Level Security enabled!"
+          exit 0
+        fi

@@ -1,0 +1,66 @@
+name: RLS Security Check (Simple)
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  rls-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run RLS Security Check
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      run: |
+        echo "🔍 Checking Row Level Security on public tables..."
+        echo "=================================================="
+        
+        # SQL query to check RLS
+        SQL='SELECT n.nspname AS table_schema, c.relname AS table_name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '"'"'public'"'"' AND c.relkind = '"'"'r'"'"' AND c.relrowsecurity = false;'
+        
+        # Run query using Supabase REST API
+        echo "Running RLS check query..."
+        
+        # Create a temporary SQL file
+        cat > query.sql << 'EOF'
+        SELECT n.nspname AS table_schema, c.relname AS table_name
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind = 'r'
+          AND c.relrowsecurity = false;
+        EOF
+        
+        # Execute the query using curl and Supabase REST API
+        RESULT=$(curl -s -X POST "$SUPABASE_URL/rest/v1/rpc/exec_sql" \
+          -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+          -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+          -H "Content-Type: application/json" \
+          -d '{"query": "SELECT n.nspname AS table_schema, c.relname AS table_name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '\''public'\'' AND c.relkind = '\''r'\'' AND c.relrowsecurity = false;"}' \
+          2>/dev/null || echo "Query execution failed")
+        
+        # Check if we got results
+        if [[ "$RESULT" == "Query execution failed" ]] || [[ "$RESULT" =~ "error" ]]; then
+          echo "❌ Error executing RLS check query"
+          echo "Response: $RESULT"
+          echo "Please check your Supabase URL and service role key"
+          exit 1
+        elif [[ -n "${RESULT//[[:space:]]/}" ]] && [[ "$RESULT" != "[]" ]] && [[ "$RESULT" != "null" ]]; then
+          echo "❌ Tables WITHOUT RLS:"
+          echo "$RESULT"
+          echo ""
+          echo "🚨 SECURITY ALERT: Tables found without RLS enabled!"
+          echo "Please enable Row Level Security on all public tables."
+          exit 1
+        else
+          echo "✅ All public tables have Row Level Security enabled!"
+          echo "No tables found without RLS protection."
+          exit 0
+        fi
